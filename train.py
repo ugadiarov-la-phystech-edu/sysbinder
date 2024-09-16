@@ -65,6 +65,7 @@ parser.add_argument('--use_broadcast_decoder', action=argparse.BooleanOptionalAc
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
+torch.set_float32_matmul_precision('medium')
 
 arg_str_list = ['{}={}'.format(k, v) for k, v in vars(args).items()]
 arg_str = '__'.join(arg_str_list)

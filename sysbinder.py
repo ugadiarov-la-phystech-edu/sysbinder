@@ -301,10 +301,17 @@ class SysBinderImageAutoEncoder(nn.Module):
             .repeat_interleave(W // W_enc, dim=-1)  # B, num_slots, 1, H, W
         attns = image.unsqueeze(1) * attns + (1. - attns)  # B, num_slots, C, H, W
 
+        # block coupling
+        slots = self.image_decoder.slot_proj(slots)  # B, num_slots, num_blocks * d_model
+        slots = slots + self.image_decoder.block_pos_proj(self.image_decoder.block_pos)  # B, num_slots, num_blocks * d_model
+        slots = slots.reshape(B, self.num_slots, self.num_blocks, -1)  # B, num_slots, num_blocks, d_model
+        slots = self.image_decoder.block_coupler(slots.flatten(end_dim=1))  # B * num_slots, num_blocks, d_model
+        slots = slots.reshape(B, self.num_slots, -1)  # B, num_slots, num_blocks * d_model
+
         if self.do_compute_rtd_loss:
             assert self.use_broadcast_decoder, 'TopDis loss implemented only for BroadCastDecoder'
-            i = np.random.choice(self.slot_size)
-            j = np.random.choice(self.num_blocks)
+            i = np.random.choice(slots.size()[-1])
+            j = np.random.choice(self.num_slots)
             m_batch = slots[:, j, i].mean(0, keepdim=True)
             s_batch = slots[:, j, i].std(0, keepdim=True)
             z_norm = (slots[:, j, i] - m_batch) / s_batch
@@ -326,15 +333,8 @@ class SysBinderImageAutoEncoder(nn.Module):
         else:
             rtd_loss = torch.as_tensor(0, dtype=torch.float32, device=slots.device)
 
-        # block coupling
-        slots = self.image_decoder.slot_proj(slots)  # B, num_slots, num_blocks * d_model
-        slots = slots + self.image_decoder.block_pos_proj(self.image_decoder.block_pos)  # B, num_slots, num_blocks * d_model
-        slots = slots.reshape(B, self.num_slots, self.num_blocks, -1)  # B, num_slots, num_blocks, d_model
-        slots = self.image_decoder.block_coupler(slots.flatten(end_dim=1))  # B * num_slots, num_blocks, d_model
-        slots = slots.reshape(B, self.num_slots * self.num_blocks, -1)  # B, num_slots * num_blocks, d_model
-
         if self.use_broadcast_decoder:
-            reconstruction = self.image_decoder(slots.reshape(B, self.num_slots, -1))
+            reconstruction = self.image_decoder(slots)
             cross_entropy = torch.as_tensor(0, dtype=torch.float32, device=slots.device)
         else:
             # dvae encode
@@ -349,7 +349,7 @@ class SysBinderImageAutoEncoder(nn.Module):
             # dvae recon
             reconstruction = self.dvae.decoder(z_soft).reshape(B, C, H, W)  # B, C, H, W
             # decode
-            pred = self.image_decoder.tf(z_emb[:, :-1], slots)   # B, H_enc * W_enc, d_model
+            pred = self.image_decoder.tf(z_emb[:, :-1], slots.reshape(B, self.num_slots * self.num_blocks, -1))   # B, H_enc * W_enc, d_model
             pred = self.image_decoder.head(pred)  # B, H_enc * W_enc, vocab_size
             cross_entropy = -(z_hard * torch.log_softmax(pred, dim=-1)).sum() / B  # 1
 

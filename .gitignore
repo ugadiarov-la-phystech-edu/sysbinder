@@ -8,6 +8,8 @@
 # dataset or logs
 datasets/
 outputs/
+wandb/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -4,6 +4,7 @@ import argparse
 import warnings
 
 import torch
+import wandb
 
 from torch.optim import Adam
 
@@ -62,10 +63,17 @@ parser.add_argument('--tau_steps', type=int, default=30000)
 parser.add_argument('--use_dp', default=True, action='store_true')
 parser.add_argument('--use_broadcast_decoder', action=argparse.BooleanOptionalAction)
 
+parser.add_argument('--wandb_project', type=str, default='Test project')
+parser.add_argument('--wandb_group', type=str, default='Test group')
+parser.add_argument('--wandb_run_name', type=str, default='Test run')
+
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
 torch.set_float32_matmul_precision('medium')
+
+wandb.init(project=args.wandb_project, group=args.wandb_group, name=args.wandb_run_name, sync_tensorboard=True,
+           dir=args.log_path)
 
 arg_str_list = ['{}={}'.format(k, v) for k, v in vars(args).items()]
 arg_str = '__'.join(arg_str_list)
@@ -267,3 +275,4 @@ for epoch in range(start_epoch, args.epochs):
         print('====> Best Loss = {:F} @ Epoch {}'.format(best_val_loss, best_epoch))
 
 writer.close()
+wandb.finish()

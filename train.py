@@ -66,6 +66,7 @@ parser.add_argument('--use_broadcast_decoder', action=argparse.BooleanOptionalAc
 parser.add_argument('--wandb_project', type=str, default='Test project')
 parser.add_argument('--wandb_group', type=str, default='Test group')
 parser.add_argument('--wandb_run_name', type=str, default='Test run')
+parser.add_argument('--wandb_resume_run_id', type=str, required=False)
 
 args = parser.parse_args()
 
@@ -73,8 +74,10 @@ torch.manual_seed(args.seed)
 torch.set_float32_matmul_precision('medium')
 
 os.makedirs(args.log_path, exist_ok=False)
+run_id = args.wandb_resume_run_id
+resume = None if run_id is None else 'must'
 wandb.init(project=args.wandb_project, group=args.wandb_group, name=args.wandb_run_name, sync_tensorboard=True,
-           dir=args.log_path)
+           dir=args.log_path, resume=resume, id=run_id)
 
 arg_str_list = ['{}={}'.format(k, v) for k, v in vars(args).items()]
 arg_str = '__'.join(arg_str_list)

@@ -272,6 +272,7 @@ class SysBinderImageAutoEncoder(nn.Module):
         # encoder networks
         self.image_encoder = ImageEncoder(args)
 
+        self.do_compute_rtd_loss = args.topdis_rtd_loss_coef > 0
         self.rtd_regularizer = RTDRegularizer(args.topdis_lp, args.topdis_q_normalize)
 
     def forward(self, image, tau):
@@ -300,7 +301,7 @@ class SysBinderImageAutoEncoder(nn.Module):
             .repeat_interleave(W // W_enc, dim=-1)  # B, num_slots, 1, H, W
         attns = image.unsqueeze(1) * attns + (1. - attns)  # B, num_slots, C, H, W
 
-        if self.rtd_loss_coef > 0:
+        if self.do_compute_rtd_loss:
             assert self.use_broadcast_decoder, 'TopDis loss implemented only for BroadCastDecoder'
             i = np.random.choice(self.slot_size)
             j = np.random.choice(self.num_blocks)

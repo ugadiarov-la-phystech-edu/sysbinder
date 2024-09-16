@@ -127,6 +127,7 @@ log_interval = train_epoch_size // 5
 model = SysBinderImageAutoEncoder(args)
 
 if os.path.isfile(args.checkpoint_path):
+    print(f'From checkpoint: {args.checkpoint_path}')
     checkpoint = torch.load(args.checkpoint_path, map_location='cpu')
     start_epoch = checkpoint['epoch']
     best_val_loss = checkpoint['best_val_loss']

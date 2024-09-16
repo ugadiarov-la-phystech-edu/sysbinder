@@ -72,6 +72,7 @@ args = parser.parse_args()
 torch.manual_seed(args.seed)
 torch.set_float32_matmul_precision('medium')
 
+os.makedirs(args.log_path, exist_ok=False)
 wandb.init(project=args.wandb_project, group=args.wandb_group, name=args.wandb_run_name, sync_tensorboard=True,
            dir=args.log_path)
 

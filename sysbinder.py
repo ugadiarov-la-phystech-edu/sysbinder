@@ -126,7 +126,7 @@ class SysBinder(nn.Module):
             # Slot update.
             slots = self.gru(
                 updates.view(-1, self.slot_size),
-                slots_prev.view(-1, self.slot_size)
+                slots_prev.reshape(-1, self.slot_size)
             )
             slots = slots.view(-1, self.num_slots, self.slot_size)
             slots = slots + self.mlp(self.norm_mlp(slots))
@@ -188,6 +188,55 @@ class ImageDecoder(nn.Module):
         self.head = linear(args.d_model, args.vocab_size, bias=False)
 
 
+class BroadCastDecoder(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self._obs_size = args.image_size
+        self._obs_channels = args.image_channels
+        hidden_size = args.cnn_hidden_size
+        slot_size = args.d_model * args.num_blocks
+        self._decoder = nn.Sequential(
+            Conv2dBlock(slot_size, hidden_size, 5, 1, 2),
+            Conv2dBlock(hidden_size, hidden_size, 5, 1, 2),
+            Conv2dBlock(hidden_size, hidden_size, 5, 1, 2),
+            conv2d(hidden_size, self._obs_channels + 1, 3, 1, 1),
+        )
+        self._pos_emb = CartesianPositionalEmbedding(slot_size, self._obs_size)
+        self.slot_proj = BlockLinear(args.slot_size, args.d_model * args.num_blocks, args.num_blocks)
+
+        self.block_pos = nn.Parameter(torch.zeros(1, 1, args.d_model * args.num_blocks), requires_grad=True)
+        self.block_pos_proj = nn.Sequential(
+            BlockLinear(args.d_model * args.num_blocks, args.d_model * args.num_blocks, args.num_blocks),
+            nn.ReLU(),
+            BlockLinear(args.d_model * args.num_blocks, args.d_model * args.num_blocks, args.num_blocks)
+        )
+
+        self.block_coupler = TransformerEncoder(num_blocks=1, d_model=args.d_model, num_heads=4)
+
+    def _spatial_broadcast(self, slots):
+        slots = slots.unsqueeze(-1).unsqueeze(-1)
+        return slots.repeat(1, 1, self._obs_size, self._obs_size)
+
+    def forward(self, slots, return_attns=False):
+        B, N, _ = slots.shape
+        # [batch_size * num_slots, d_slots]
+        slots = slots.flatten(0, 1)
+        # [batch_size * num_slots, d_slots, obs_size, obs_size]
+        slots = self._spatial_broadcast(slots)
+        out = self._decoder(self._pos_emb(slots))
+        img_slots, masks = out[:, : self._obs_channels], out[:, -1:]
+        img_slots = img_slots.view(
+            B, N, self._obs_channels, self._obs_size, self._obs_size
+        )
+        masks = masks.view(B, N, 1, self._obs_size, self._obs_size)
+        masks = masks.softmax(dim=1)
+        recon_slots_masked = img_slots * masks
+        if return_attns:
+            return recon_slots_masked
+        else:
+            return recon_slots_masked.sum(dim=1)
+
+
 class SysBinderImageAutoEncoder(nn.Module):
     
     def __init__(self, args):
@@ -204,15 +253,19 @@ class SysBinderImageAutoEncoder(nn.Module):
         self.vocab_size = args.vocab_size
         self.d_model = args.d_model
         self.num_blocks = args.num_blocks
+        self.use_broadcast_decoder = args.use_broadcast_decoder
 
-        # dvae
-        self.dvae = dVAE(args.vocab_size, args.image_channels)
+        if self.use_broadcast_decoder:
+            self.image_decoder = BroadCastDecoder(args)
+        else:
+            # dvae
+            self.dvae = dVAE(args.vocab_size, args.image_channels)
+
+            # decoder networks
+            self.image_decoder = ImageDecoder(args)
 
         # encoder networks
         self.image_encoder = ImageEncoder(args)
-
-        # decoder networks
-        self.image_decoder = ImageDecoder(args)
 
     def forward(self, image, tau):
         """
@@ -220,19 +273,6 @@ class SysBinderImageAutoEncoder(nn.Module):
         tau: float
         """
         B, C, H, W = image.size()
-
-        # dvae encode
-        z_logits = F.log_softmax(self.dvae.encoder(image), dim=1)  # B, vocab_size, H_enc, W_enc
-        z_soft = gumbel_softmax(z_logits, tau, False, dim=1)  # B, vocab_size, H_enc, W_enc
-        z_hard = gumbel_softmax(z_logits, tau, True, dim=1).detach()  # B, vocab_size, H_enc, W_enc
-        z_hard = z_hard.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)  # B, H_enc * W_enc, vocab_size
-        z_emb = self.image_decoder.dict(z_hard)  # B, H_enc * W_enc, d_model
-        z_emb = torch.cat([self.image_decoder.bos.expand(B, -1, -1), z_emb], dim=1)  # B, 1 + H_enc * W_enc, d_model
-        z_emb = self.image_decoder.decoder_pos(z_emb)  # B, 1 + H_enc * W_enc, d_model
-
-        # dvae recon
-        dvae_recon = self.dvae.decoder(z_soft).reshape(B, C, H, W)  # B, C, H, W
-        dvae_mse = ((image - dvae_recon) ** 2).sum() / B  # 1
 
         # sysbinder
         emb = self.image_encoder.cnn(image)  # B, cnn_hidden_size, H, W
@@ -260,14 +300,31 @@ class SysBinderImageAutoEncoder(nn.Module):
         slots = self.image_decoder.block_coupler(slots.flatten(end_dim=1))  # B * num_slots, num_blocks, d_model
         slots = slots.reshape(B, self.num_slots * self.num_blocks, -1)  # B, num_slots * num_blocks, d_model
 
-        # decode
-        pred = self.image_decoder.tf(z_emb[:, :-1], slots)   # B, H_enc * W_enc, d_model
-        pred = self.image_decoder.head(pred)  # B, H_enc * W_enc, vocab_size
-        cross_entropy = -(z_hard * torch.log_softmax(pred, dim=-1)).sum() / B  # 1
+        if self.use_broadcast_decoder:
+            reconstruction = self.image_decoder(slots.reshape(B, self.num_slots, -1))
+            cross_entropy = torch.as_tensor(0, dtype=torch.float32, device=slots.device)
+        else:
+            # dvae encode
+            z_logits = F.log_softmax(self.dvae.encoder(image), dim=1)  # B, vocab_size, H_enc, W_enc
+            z_soft = gumbel_softmax(z_logits, tau, False, dim=1)  # B, vocab_size, H_enc, W_enc
+            z_hard = gumbel_softmax(z_logits, tau, True, dim=1).detach()  # B, vocab_size, H_enc, W_enc
+            z_hard = z_hard.permute(0, 2, 3, 1).flatten(start_dim=1, end_dim=2)  # B, H_enc * W_enc, vocab_size
+            z_emb = self.image_decoder.dict(z_hard)  # B, H_enc * W_enc, d_model
+            z_emb = torch.cat([self.image_decoder.bos.expand(B, -1, -1), z_emb], dim=1)  # B, 1 + H_enc * W_enc, d_model
+            z_emb = self.image_decoder.decoder_pos(z_emb)  # B, 1 + H_enc * W_enc, d_model
 
-        return (dvae_recon.clamp(0., 1.),
+            # dvae recon
+            reconstruction = self.dvae.decoder(z_soft).reshape(B, C, H, W)  # B, C, H, W
+            # decode
+            pred = self.image_decoder.tf(z_emb[:, :-1], slots)   # B, H_enc * W_enc, d_model
+            pred = self.image_decoder.head(pred)  # B, H_enc * W_enc, vocab_size
+            cross_entropy = -(z_hard * torch.log_softmax(pred, dim=-1)).sum() / B  # 1
+
+        reconstruction_loss = ((image - reconstruction) ** 2).sum() / B  # 1
+
+        return (reconstruction.clamp(0., 1.),
                 cross_entropy,
-                dvae_mse,
+                reconstruction_loss,
                 attns)
 
     def encode(self, image):
@@ -312,22 +369,25 @@ class SysBinderImageAutoEncoder(nn.Module):
         slots = self.image_decoder.block_coupler(slots.flatten(end_dim=1))  # B * num_slots, num_blocks, d_model
         slots = slots.reshape(B, num_slots * self.num_blocks, -1)  # B, num_slots * num_blocks, d_model
 
-        # generate image tokens auto-regressively
-        z_gen = slots.new_zeros(0)
-        input = self.image_decoder.bos.expand(B, 1, -1)
-        for t in range(gen_len):
-            decoder_output = self.image_decoder.tf(
-                self.image_decoder.decoder_pos(input),
-                slots
-            )
-            z_next = F.one_hot(self.image_decoder.head(decoder_output)[:, -1:].argmax(dim=-1), self.vocab_size)
-            z_gen = torch.cat((z_gen, z_next), dim=1)
-            input = torch.cat((input, self.image_decoder.dict(z_next)), dim=1)
+        if self.use_broadcast_decoder:
+            image_from_slots = self.image_decoder(slots.reshape(B, self.num_slots, -1))
+        else:
+            # generate image tokens auto-regressively
+            z_gen = slots.new_zeros(0)
+            input = self.image_decoder.bos.expand(B, 1, -1)
+            for t in range(gen_len):
+                decoder_output = self.image_decoder.tf(
+                    self.image_decoder.decoder_pos(input),
+                    slots
+                )
+                z_next = F.one_hot(self.image_decoder.head(decoder_output)[:, -1:].argmax(dim=-1), self.vocab_size)
+                z_gen = torch.cat((z_gen, z_next), dim=1)
+                input = torch.cat((input, self.image_decoder.dict(z_next)), dim=1)
 
-        z_gen = z_gen.transpose(1, 2).float().reshape(B, -1, H_enc, W_enc)
-        gen_transformer = self.dvae.decoder(z_gen)
+            z_gen = z_gen.transpose(1, 2).float().reshape(B, -1, H_enc, W_enc)
+            image_from_slots = self.dvae.decoder(z_gen)
 
-        return gen_transformer.clamp(0., 1.)
+        return image_from_slots.clamp(0., 1.)
 
     def reconstruct_autoregressive(self, image):
         """

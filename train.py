@@ -1,6 +1,7 @@
 import os
 import math
 import argparse
+import warnings
 
 import torch
 
@@ -17,7 +18,7 @@ import torchvision.utils as vutils
 from datetime import datetime
 
 from sysbinder import SysBinderImageAutoEncoder
-from data import GlobDataset
+from data import GlobDataset, DummyDataset
 from utils import linear_warmup, cosine_anneal
 
 parser = argparse.ArgumentParser()
@@ -29,7 +30,7 @@ parser.add_argument('--image_size', type=int, default=128)
 parser.add_argument('--image_channels', type=int, default=3)
 
 parser.add_argument('--checkpoint_path', default='checkpoint.pt.tar')
-parser.add_argument('--data_path', default='data/*.png')
+parser.add_argument('--data_path', required=False)
 parser.add_argument('--log_path', default='logs/')
 
 parser.add_argument('--lr_dvae', type=float, default=3e-4)
@@ -59,6 +60,7 @@ parser.add_argument('--tau_final', type=float, default=0.1)
 parser.add_argument('--tau_steps', type=int, default=30000)
 
 parser.add_argument('--use_dp', default=True, action='store_true')
+parser.add_argument('--use_broadcast_decoder', action=argparse.BooleanOptionalAction)
 
 args = parser.parse_args()
 
@@ -86,9 +88,13 @@ def visualize(image, recon_dvae, recon_tf, attns, N=8):
 
     return grid
 
-
-train_dataset = GlobDataset(root=args.data_path, phase='train', img_size=args.image_size)
-val_dataset = GlobDataset(root=args.data_path, phase='val', img_size=args.image_size)
+if args.data_path is None:
+    warnings.warn('DummyDataset is used!')
+    train_dataset = DummyDataset(img_size=args.image_size, img_channels=args.image_channels)
+    val_dataset = DummyDataset(img_size=args.image_size, img_channels=args.image_channels)
+else:
+    train_dataset = GlobDataset(root=args.data_path, phase='train', img_size=args.image_size)
+    val_dataset = GlobDataset(root=args.data_path, phase='val', img_size=args.image_size)
 
 train_sampler = None
 val_sampler = None

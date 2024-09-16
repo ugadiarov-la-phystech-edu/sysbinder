@@ -1,6 +1,11 @@
+from rtd.rtd_regularizer import RTDRegularizer
 from utils import *
 from transformer import TransformerEncoder, TransformerDecoder
 from dvae import dVAE
+
+
+normal_s = lambda x: 0.5 * (torch.erf(x/np.sqrt(2)) + 1)
+normal_sinv = lambda x: np.sqrt(2) * torch.erfinv(2 * x - 1)
 
 
 class BlockPrototypeMemory(nn.Module):
@@ -267,6 +272,8 @@ class SysBinderImageAutoEncoder(nn.Module):
         # encoder networks
         self.image_encoder = ImageEncoder(args)
 
+        self.rtd_regularizer = RTDRegularizer(args.topdis_lp, args.topdis_q_normalize)
+
     def forward(self, image, tau):
         """
         image: B, C, H, W
@@ -292,6 +299,31 @@ class SysBinderImageAutoEncoder(nn.Module):
             .repeat_interleave(H // H_enc, dim=-2)\
             .repeat_interleave(W // W_enc, dim=-1)  # B, num_slots, 1, H, W
         attns = image.unsqueeze(1) * attns + (1. - attns)  # B, num_slots, C, H, W
+
+        if self.rtd_loss_coef > 0:
+            assert self.use_broadcast_decoder, 'TopDis loss implemented only for BroadCastDecoder'
+            i = np.random.choice(self.slot_size)
+            j = np.random.choice(self.num_blocks)
+            m_batch = slots[:, j, i].mean(0, keepdim=True)
+            s_batch = slots[:, j, i].std(0, keepdim=True)
+            z_norm = (slots[:, j, i] - m_batch) / s_batch
+            prob = normal_s(z_norm)
+            C = 1 / 8
+            sgn = torch.sign(torch.randn(1)).item()
+            if sgn > 0:
+                mask = (prob + C < 1)
+            else:
+                mask = (prob - C > 0)
+                C = -C
+
+            z_valid = slots[mask].clone()
+            z_new = z_valid.clone()
+            z_new[:, j, i] = normal_sinv(prob[mask] + C) * s_batch + m_batch
+            mask_valid = self.image_decoder(z_valid, return_attns=True)
+            mask_new = self.image_decoder(z_new, return_attns=True)
+            rtd_loss = self.rtd_regularizer.compute_reg(mask_valid[:, j], mask_new[:, j])
+        else:
+            rtd_loss = torch.as_tensor(0, dtype=torch.float32, device=slots.device)
 
         # block coupling
         slots = self.image_decoder.slot_proj(slots)  # B, num_slots, num_blocks * d_model
@@ -325,6 +357,7 @@ class SysBinderImageAutoEncoder(nn.Module):
         return (reconstruction.clamp(0., 1.),
                 cross_entropy,
                 reconstruction_loss,
+                rtd_loss,
                 attns)
 
     def encode(self, image):

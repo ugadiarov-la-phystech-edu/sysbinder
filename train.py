@@ -68,6 +68,10 @@ parser.add_argument('--wandb_group', type=str, default='Test group')
 parser.add_argument('--wandb_run_name', type=str, default='Test run')
 parser.add_argument('--wandb_resume_run_id', type=str, required=False)
 
+parser.add_argument('--topdis_rtd_loss_coef', type=float, default=0.1)
+parser.add_argument('--topdis_lp', type=int, default=2)
+parser.add_argument('--topdis_q_normalize', action=argparse.BooleanOptionalAction)
+
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
@@ -192,13 +196,14 @@ for epoch in range(start_epoch, args.epochs):
 
         optimizer.zero_grad()
         
-        (recon_dvae, cross_entropy, mse, attns) = model(image, tau)
+        (recon_dvae, cross_entropy, mse, rtd_loss, attns) = model(image, tau)
 
         if args.use_dp:
             mse = mse.mean()
             cross_entropy = cross_entropy.mean()
+            rtd_loss = rtd_loss.mean()
 
-        loss = mse + cross_entropy
+        loss = mse + cross_entropy + args.topdis_rtd_loss_coef * rtd_loss
         
         loss.backward()
 
@@ -214,6 +219,7 @@ for epoch in range(start_epoch, args.epochs):
                 writer.add_scalar('TRAIN/loss', loss.item(), global_step)
                 writer.add_scalar('TRAIN/cross_entropy', cross_entropy.item(), global_step)
                 writer.add_scalar('TRAIN/mse', mse.item(), global_step)
+                writer.add_scalar('TRAIN/rtd_loss', rtd_loss.item(), global_step)
 
                 writer.add_scalar('TRAIN/tau', tau, global_step)
                 writer.add_scalar('TRAIN/lr_dvae', optimizer.param_groups[0]['lr'], global_step)
@@ -232,27 +238,32 @@ for epoch in range(start_epoch, args.epochs):
 
         val_cross_entropy = 0.
         val_mse = 0.
+        val_rtd_loss = 0.
 
         for batch, image in enumerate(val_loader):
             image = image.cuda()
 
-            (recon_dvae, cross_entropy, mse, attns) = model(image, tau)
+            (recon_dvae, cross_entropy, mse, rtd_loss, attns) = model(image, tau)
 
             if args.use_dp:
                 mse = mse.mean()
                 cross_entropy = cross_entropy.mean()
+                rtd_loss = rtd_loss.mean()
 
             val_cross_entropy += cross_entropy.item()
             val_mse += mse.item()
+            val_rtd_loss += rtd_loss.item()
 
         val_cross_entropy /= (val_epoch_size)
         val_mse /= (val_epoch_size)
+        val_rtd_loss /= (val_epoch_size)
 
-        val_loss = val_mse + val_cross_entropy
+        val_loss = val_mse + val_cross_entropy + args.topdis_rtd_loss_coef * val_rtd_loss
 
         writer.add_scalar('VAL/loss', val_loss, epoch+1)
         writer.add_scalar('VAL/cross_entropy', val_cross_entropy, epoch + 1)
         writer.add_scalar('VAL/mse', val_mse, epoch+1)
+        writer.add_scalar('VAL/rtd_loss', val_rtd_loss, epoch + 1)
 
         print('====> Epoch: {:3} \t Loss = {:F}'.format(epoch+1, val_loss))
 

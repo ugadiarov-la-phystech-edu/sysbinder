@@ -229,9 +229,7 @@ for epoch in range(start_epoch, args.epochs):
     with torch.no_grad():
         recon_tf = (model.module if args.use_dp else model).reconstruct_autoregressive(image[:8])
         grid = visualize(image, recon_dvae, recon_tf, attns, N=8)
-        writer.add_image('TRAIN/recons', grid, global_step)
-
-    writer.add_scalar('TRAIN/epoch', epoch + 1, global_step)
+        writer.add_image('TRAIN_recons/epoch={:03}'.format(epoch+1), grid)
     
     with torch.no_grad():
         model.eval()
@@ -276,7 +274,7 @@ for epoch in range(start_epoch, args.epochs):
             if 50 <= epoch:
                 recon_tf = (model.module if args.use_dp else model).reconstruct_autoregressive(image[:8])
                 grid = visualize(image, recon_dvae, recon_tf, attns, N=8)
-                writer.add_image('VAL/recons', grid, epoch + 1)
+                writer.add_image('VAL_recons/epoch={:03}'.format(epoch + 1), grid)
 
         writer.add_scalar('VAL/best_loss', best_val_loss, epoch+1)
 

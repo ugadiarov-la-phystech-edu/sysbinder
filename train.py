@@ -77,9 +77,9 @@ args = parser.parse_args()
 torch.manual_seed(args.seed)
 torch.set_float32_matmul_precision('medium')
 
-os.makedirs(args.log_path, exist_ok=False)
+os.makedirs(args.log_path, exist_ok=True)
 run_id = args.wandb_resume_run_id
-resume = None if run_id is None else 'must'
+resume = 'never' if run_id is None else 'must'
 wandb.init(project=args.wandb_project, group=args.wandb_group, name=args.wandb_run_name, sync_tensorboard=True,
            dir=args.log_path, resume=resume, id=run_id)
 
